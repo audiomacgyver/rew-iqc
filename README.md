@@ -328,4 +328,8 @@ I built this for my own production use and I'm sharing it as-is. I don't have ba
 
 Built on the REW V5.40 REST API by John Mulcahy. REW handles all audio I/O, sweep generation, signal processing, and frequency response computation. This tool adds limit-mask evaluation, pass/fail reporting, and operator workflow automation as an external client.
 
-REW is free software at [roomeqwizard.com](https://www.roomeqwizard.com). Pro upgrade required for auto-measure.
+Code and documentation developed with HEAVY assistance from Claude (Anthropic).
+
+REW is free software at [roomeqwizard.com](https://www.roomeqwizard.com).
+
+Pro upgrade required for auto-measure.
