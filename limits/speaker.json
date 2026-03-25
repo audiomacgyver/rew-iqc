@@ -1,0 +1,42 @@
+{
+  "name": "Speaker IQC",
+  "version": "1.0",
+  "smoothing": "1/12",
+  "ppo": 48,
+  "freq_range_hz": [200, 16000],
+  "limits": [
+    { "freq_hz": 100,   "upper_db": 80, "lower_db": 50 },
+    { "freq_hz": 200,   "upper_db": 78, "lower_db": 58 },
+    { "freq_hz": 300,   "upper_db": 79, "lower_db": 63 },
+    { "freq_hz": 500,   "upper_db": 80, "lower_db": 66 },
+    { "freq_hz": 700,   "upper_db": 81, "lower_db": 69 },
+    { "freq_hz": 1000,  "upper_db": 81, "lower_db": 71 },
+    { "freq_hz": 1500,  "upper_db": 81, "lower_db": 71 },
+    { "freq_hz": 2000,  "upper_db": 81, "lower_db": 71 },
+    { "freq_hz": 3000,  "upper_db": 80, "lower_db": 69 },
+    { "freq_hz": 4000,  "upper_db": 79, "lower_db": 68 },
+    { "freq_hz": 5000,  "upper_db": 79, "lower_db": 67 },
+    { "freq_hz": 6000,  "upper_db": 78, "lower_db": 65 },
+    { "freq_hz": 8000,  "upper_db": 78, "lower_db": 62 },
+    { "freq_hz": 10000, "upper_db": 78, "lower_db": 58 },
+    { "freq_hz": 12000, "upper_db": 78, "lower_db": 55 },
+    { "freq_hz": 14000, "upper_db": 80, "lower_db": 50 },
+    { "freq_hz": 16000, "upper_db": 82, "lower_db": 44 }
+  ],
+  "thd_limits": {
+    "freq_range_hz": [200, 10000],
+    "ppo": 12,
+    "limits": [
+      { "freq_hz": 200,   "max_thd_pct": 10.0 },
+      { "freq_hz": 500,   "max_thd_pct": 5.0 },
+      { "freq_hz": 1000,  "max_thd_pct": 3.0 },
+      { "freq_hz": 2000,  "max_thd_pct": 3.0 },
+      { "freq_hz": 5000,  "max_thd_pct": 5.0 },
+      { "freq_hz": 10000, "max_thd_pct": 10.0 }
+    ]
+  },
+  "metadata": {
+    "part_number": "SPK-EXAMPLE",
+    "notes": "Example mask with magnitude and THD limits. Adjust to your golden sample population."
+  }
+}
