@@ -37,7 +37,7 @@ Architecture:
     REW API spec: http://localhost:4735/doc.json
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import base64
@@ -250,6 +250,7 @@ class IQCResult:
     timestamp: str
     measurement_name: str
     measurement_uuid: str
+    serial_number: str
     limit_mask_name: str
     passed: bool
     mag_passed: bool
@@ -712,14 +713,20 @@ def plot_result(
         fontfamily="monospace", zorder=11,
     )
 
+    # Build title with optional serial number
+    if result.serial_number:
+        title_str = "IQC: {} [SN: {}]  |  Mask: {} v{}  |  {}".format(
+            result.measurement_name, result.serial_number,
+            mask.name, mask.version, result.timestamp
+        )
+    else:
+        title_str = "IQC: {}  |  Mask: {} v{}  |  {}".format(
+            result.measurement_name, mask.name, mask.version, result.timestamp
+        )
+
     # Magnitude panel labels
     ax_mag.set_ylabel("Magnitude (dB SPL)", fontsize=12)
-    ax_mag.set_title(
-        "IQC: {}  |  Mask: {} v{}  |  {}".format(
-            result.measurement_name, mask.name, mask.version, result.timestamp
-        ),
-        fontsize=12, fontweight="bold",
-    )
+    ax_mag.set_title(title_str, fontsize=12, fontweight="bold")
     ax_mag.legend(loc="lower left", fontsize=10)
     ax_mag.grid(True, which="both", alpha=0.3)
 
@@ -830,8 +837,8 @@ def write_csv_report(results: List[IQCResult], path: Union[str, Path]):
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow([
-                "timestamp", "measurement_name", "uuid", "limit_mask",
-                "result", "mag_result", "thd_result",
+                "timestamp", "serial_number", "measurement_name", "uuid",
+                "limit_mask", "result", "mag_result", "thd_result",
                 "violations_summary", "plot_file",
             ])
         for r in results:
@@ -859,8 +866,8 @@ def write_csv_report(results: List[IQCResult], path: Union[str, Path]):
             vsummary = "; ".join(vsummary_parts) or "none"
 
             writer.writerow([
-                r.timestamp, r.measurement_name, r.measurement_uuid,
-                r.limit_mask_name,
+                r.timestamp, r.serial_number, r.measurement_name,
+                r.measurement_uuid, r.limit_mask_name,
                 "PASS" if r.passed else "FAIL",
                 "PASS" if r.mag_passed else "FAIL",
                 "PASS" if r.thd_passed else "FAIL",
@@ -884,6 +891,7 @@ class IQCEngine:
     def check_measurement(
         self,
         id_or_uuid: str,
+        serial_number: str = "",
         save_plot: bool = True,
         show_plot: bool = False,
     ) -> IQCResult:
@@ -892,7 +900,8 @@ class IQCEngine:
         name = summary.get("title", "meas_{}".format(id_or_uuid))
         uuid = summary.get("uuid", str(id_or_uuid))
 
-        log.info("Checking: {} (UUID: {})".format(name, uuid))
+        label = "{} [SN: {}]".format(name, serial_number) if serial_number else name
+        log.info("Checking: {} (UUID: {})".format(label, uuid))
 
         # --- Fetch magnitude data ---
         freq, mag, _phase = self.rew.get_frequency_response(
@@ -932,6 +941,7 @@ class IQCEngine:
             timestamp=ts,
             measurement_name=name,
             measurement_uuid=uuid,
+            serial_number=serial_number,
             limit_mask_name="{} v{}".format(self.mask.name, self.mask.version),
             passed=passed,
             mag_passed=mag_passed,
@@ -949,9 +959,18 @@ class IQCEngine:
             safe_name = "".join(
                 c if c.isalnum() or c in "-_ " else "_" for c in name
             )
-            plot_file = PLOT_DIR / "{}_{}.png".format(
-                safe_name, ts.replace(":", "").replace(" ", "_")
-            )
+            if serial_number:
+                safe_sn = "".join(
+                    c if c.isalnum() or c in "-_" else "_" for c in serial_number
+                )
+                plot_name = "{}_{}_{}".format(
+                    safe_sn, safe_name, ts.replace(":", "").replace(" ", "_")
+                )
+            else:
+                plot_name = "{}_{}".format(
+                    safe_name, ts.replace(":", "").replace(" ", "_")
+                )
+            plot_file = PLOT_DIR / "{}.png".format(plot_name)
             result.plot_path = plot_result(
                 result, self.mask, plot_file, show=show_plot
             )
@@ -980,7 +999,11 @@ class IQCEngine:
                             v["worst_limit_pct"], v["count"]
                         )
                     )
-        log.info("  Overall: {}".format("PASS" if passed else "FAIL"))
+        # Log the verdict
+        log.info("  Overall: {}{}".format(
+            "PASS" if passed else "FAIL",
+            " [SN: {}]".format(serial_number) if serial_number else ""
+        ))
 
         return result
 
@@ -1054,18 +1077,21 @@ def operator_loop(mask_path: str, show_plots: bool = False, auto_measure: bool =
     if auto_measure:
         print("\nWorkflow:")
         print("  1. Load DUT into fixture")
-        print("  2. Press ENTER -- sweep runs automatically, then evaluates")
-        print("  3. Type 'q' to quit\n")
+        print("  2. Enter serial number (or press ENTER to skip)")
+        print("  3. Sweep runs automatically, then evaluates")
+        print("  4. Type 'q' to quit\n")
     else:
         print("\nWorkflow:")
         print("  1. Load DUT into fixture, run sweep in REW")
-        print("  2. Press ENTER to evaluate the selected measurement")
-        print("  3. Type 'q' to quit\n")
+        print("  2. Enter serial number (or press ENTER to skip)")
+        print("  3. Evaluates the selected measurement")
+        print("  4. Type 'q' to quit\n")
 
     while True:
-        user = input(">> Press ENTER to evaluate (or 'q' to quit): ").strip()
+        user = input(">> Enter serial number (or ENTER to skip, 'q' to quit): ").strip()
         if user.lower() == "q":
             break
+        serial_number = user
 
         try:
             if auto_measure:
@@ -1077,18 +1103,24 @@ def operator_loop(mask_path: str, show_plots: bool = False, auto_measure: bool =
             else:
                 uuid = rew.get_selected_uuid()
 
-            result = engine.check_measurement(uuid, save_plot=True, show_plot=show_plots)
+            result = engine.check_measurement(uuid, serial_number=serial_number,
+                                                save_plot=True, show_plot=show_plots)
 
             # Print big PASS/FAIL to console
+            sn_label = " [SN: {}]".format(serial_number) if serial_number else ""
             if result.passed:
                 print("\n" + "=" * 40)
                 print("       PASS  PASS  PASS  PASS  PASS")
                 print("       ====  ====  ====  ====  ====")
+                if sn_label:
+                    print("      {}".format(sn_label))
                 print("=" * 40 + "\n")
             else:
                 print("\n" + "=" * 40)
                 print("       FAIL  FAIL  FAIL  FAIL  FAIL")
                 print("       ====  ====  ====  ====  ====")
+                if sn_label:
+                    print("      {}".format(sn_label))
                 print("=" * 40)
                 # Print magnitude violations
                 for v in result.mag_details.get("violations", []):
@@ -1131,7 +1163,7 @@ def operator_loop(mask_path: str, show_plots: bool = False, auto_measure: bool =
 def main():
     parser = argparse.ArgumentParser(
         description="REW IQC Pass/Fail Tool v{} -- speaker incoming quality control "
-                    "via REW 5.40+ REST API (magnitude + THD)".format(__version__)
+                    "via REW 5.40+ REST API (magnitude + THD + serial tracking)".format(__version__)
     )
     parser.add_argument(
         "--limits", "-l", type=str, default=None,

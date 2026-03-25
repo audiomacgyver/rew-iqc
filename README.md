@@ -1,6 +1,6 @@
 # REW IQC Pass/Fail Tool
 
-**v1.1.0** -- Speaker incoming quality control via the REW 5.40+ REST API.
+**v1.2.0** -- Speaker incoming quality control via the REW 5.40+ REST API.
 
 Automated pass/fail evaluation of loudspeaker frequency response and THD against configurable limit masks. Designed for factory floor IQC where an operator needs a fast, unambiguous PASS/FAIL with full traceability.
 
@@ -12,7 +12,7 @@ Automated pass/fail evaluation of loudspeaker frequency response and THD against
 4. Evaluates magnitude against an upper/lower dB SPL envelope
 5. Evaluates THD against a frequency-dependent percent ceiling (optional)
 6. Displays a large, color-coded PASS/FAIL result (console + plot image)
-7. Logs every result to a daily CSV report for traceability
+7. Logs every result with serial number to a daily CSV report for traceability
 
 A DUT must pass **both** magnitude and THD checks (if configured) to receive an overall PASS.
 
@@ -46,10 +46,9 @@ The Python script is a thin REST client. All audio I/O, sweep generation, signal
 ## Quick start
 
 ```bash
-# 1. Create project folder and save files
-mkdir -p ~/iqc_tool/limits
-cd ~/iqc_tool
-# Save rew_iqc.py and limits/speaker.json here
+# 1. Clone this repo
+git clone https://github.com/audiomacgyver/rew-iqc.git
+cd rew-iqc
 
 # 2. Install dependencies
 pip3 install requests numpy matplotlib
@@ -102,17 +101,30 @@ These settings persist across REW sessions.
 
 ### Auto-measure (recommended for production)
 
-Requires REW Pro license. Press Enter and the script triggers the sweep, waits for completion, then evaluates.
+Requires REW Pro license. Enter the serial number (or press Enter to skip), and the script triggers the sweep, waits for completion, then evaluates.
 
 ```bash
 python3 rew_iqc.py --limits limits/speaker.json --auto
 ```
 
-Operator workflow: Load DUT into fixture, press Enter, see PASS/FAIL, repeat. Type `q` to quit and see yield summary.
+Operator workflow:
+
+```
+>> Enter serial number (or ENTER to skip, 'q' to quit): SN-00142
+  Measuring...
+
+========================================
+       PASS  PASS  PASS  PASS  PASS
+       ====  ====  ====  ====  ====
+       [SN: SN-00142]
+========================================
+```
+
+Load DUT, enter serial, see PASS/FAIL, repeat. Type `q` to quit and see yield summary.
 
 ### Manual
 
-No Pro license needed. Run sweeps in REW, press Enter in the script to evaluate the selected measurement.
+No Pro license needed. Run sweeps in REW, enter the serial number in the script to evaluate the selected measurement.
 
 ```bash
 python3 rew_iqc.py --limits limits/speaker.json
@@ -204,6 +216,17 @@ The tool interpolates linearly between anchor points, so you only need to define
 5. For THD: measure distortion on the golden samples and set the ceiling above the population spread
 6. Set `freq_range_hz` to exclude regions below the DUT's usable bandwidth
 
+## Serial number tracking
+
+The operator is prompted for a serial number before each test. Serial numbers appear in:
+
+- **Console output**: shown under the PASS/FAIL banner
+- **Plot title**: `IQC: measurement_name [SN: xxx] | Mask: ...`
+- **Plot filename**: `SN-00142_measurement_name_2026-03-25_143000.png`
+- **CSV report**: dedicated `serial_number` column
+
+Pressing Enter without typing a serial number skips it -- nothing breaks, the field is just left blank.
+
 ## Output files
 
 ### Plots
@@ -222,6 +245,7 @@ Appended to `iqc_reports/iqc_report_YYYYMMDD.csv` with columns:
 | Column | Description |
 |--------|-------------|
 | `timestamp` | Date and time of evaluation |
+| `serial_number` | DUT serial number entered by operator |
 | `measurement_name` | REW measurement name |
 | `uuid` | REW measurement UUID |
 | `limit_mask` | Mask name and version |
@@ -230,6 +254,8 @@ Appended to `iqc_reports/iqc_report_YYYYMMDD.csv` with columns:
 | `thd_result` | THD PASS or FAIL |
 | `violations_summary` | Details of all violations |
 | `plot_file` | Path to saved plot PNG |
+
+A new report file is created each day. Results are appended within the day.
 
 ## Command-line reference
 
@@ -256,7 +282,7 @@ Implementation details discovered during development:
 
 - `GET /measurements` returns a **dict keyed by index strings** (`"1"`, `"2"`, ...), not a list
 - `GET /measurements/{id}/frequency-response` uses `"magnitude"` (singular) as the key
-- `GET /measurements/{id}/distortion` returns `columnHeaders` and a 2D `data` array; some rows may have fewer columns than others (missing harmonics)
+- `GET /measurements/{id}/distortion` returns `columnHeaders` and a 2D `data` array; some rows may have fewer columns than others (missing harmonics at certain frequencies)
 - `GET /measurements/selected-uuid` returns a bare quoted string
 - `POST /measure/command` with `{"command": "SPL"}` triggers a sweep; valid commands listed at `GET /measure/commands`
 - **Blocking mode** may not reliably block for measurement commands -- the tool polls measurement count to detect completion
@@ -271,27 +297,32 @@ Implementation details discovered during development:
 | Auto-measure fires but evaluates old data | Verify sweep runs (hear test signal, see new measurement in REW). Check audio I/O config. |
 | `inhomogeneous shape` error on distortion | Fixed in v1.1.0. The parser handles ragged rows where harmonics are missing. |
 | Plot doesn't open in Preview | Test: `open ~/iqc_tool/iqc_plots/somefile.png`. Check log for "Opening plot:" line. |
-| `SyntaxError: from __future__` | The `from __future__ import annotations` line must be the very first line in the file. |
+| `SyntaxError: from __future__` | Must be the very first line in the file. Re-copy the script from the repo. |
 | urllib3 OpenSSL warning | Cosmetic. macOS system Python 3.9 uses LibreSSL. Install Python 3.10+ via Homebrew to resolve. |
 | `TimeoutError: Measurement did not complete` | Default is 60s. Adjust in `measure_spl()` if your sweep is longer. |
 
 ## File structure
 
 ```
-~/iqc_tool/
-  rew_iqc.py                          # Main script (v1.1.0)
-  README.md                           # This file
+rew-iqc/
+  rew_iqc.py                              # Main script (v1.2.0)
+  README.md                               # This file
+  LICENSE                                  # MIT License
   limits/
-    speaker.json                      # Limit mask (customize per DUT)
+    speaker.json                           # Limit mask (customize per DUT)
   iqc_plots/
-    L_R Unit A Mar 25_2026-03-25.png  # One plot per evaluation
+    SN-00142_L_R Unit A_2026-03-25.png    # One plot per evaluation
   iqc_reports/
-    iqc_report_20260325.csv           # Daily CSV report
+    iqc_report_20260325.csv                # Daily CSV report
 ```
 
 ## License
 
 MIT License. See LICENSE file.
+
+## Disclaimer
+
+I built this for my own production use and I'm sharing it as-is. I don't have bandwidth to maintain it as an ongoing project, but I'll push updates to the repo if I make improvements on my end.
 
 ## Acknowledgments
 
