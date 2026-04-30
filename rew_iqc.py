@@ -5,8 +5,8 @@ REW IQC Pass/Fail Tool
 Factory floor incoming quality control for speakers via REW 5.40+ API.
 
 Connects to REW's localhost REST API, pulls frequency response and
-distortion data, and evaluates against configurable limit masks
-for both magnitude and THD.
+distortion data, and evaluates against configurable limit masks for
+magnitude, THD, and HOHD (Higher-Order Harmonic Distortion).
 
 Requirements:
     pip3 install requests numpy matplotlib
@@ -37,7 +37,7 @@ Architecture:
     REW API spec: http://localhost:4735/doc.json
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.1"
 
 import argparse
 import base64
@@ -94,7 +94,7 @@ log = logging.getLogger("rew_iqc")
 
 @dataclass
 class LimitMask:
-    """Upper/lower frequency-dependent limit envelope with optional THD limits.
+    """Upper/lower frequency-dependent limit envelope with optional THD/HOHD limits.
 
     The mask defines an acceptable corridor for a speaker's frequency
     response. Frequencies and dB values are specified at anchor points;
@@ -106,21 +106,35 @@ class LimitMask:
     value applies as a flat ceiling; multiple points define a frequency-
     dependent limit that the tool interpolates between.
 
+    HOHD limits (Higher-Order Harmonic Distortion) work the same way as
+    THD limits but cover a separate, user-selected band of harmonics
+    (typically H10-H15). HOHD is computed by sqrt-sum-of-squares of the
+    selected harmonic columns from REW's per-harmonic data.
+
     Attributes:
-        name:           Display name (shown on plots and reports)
-        version:        Version string for traceability
-        freq_hz:        Anchor frequencies in Hz (monotonically increasing)
-        upper_db:       Upper dB SPL limit at each anchor frequency
-        lower_db:       Lower dB SPL limit at each anchor frequency
-        smoothing:      Smoothing to request from REW (e.g. "1/12", "1/3")
-        ppo:            Points per octave for the frequency response data
-        freq_range:     (low_hz, high_hz) — evaluation window for magnitude
-        thd_freq_hz:    Anchor frequencies for THD limits (Hz)
-        thd_max_pct:    Maximum THD (%) at each anchor frequency
-                        (e.g. 3.0 = THD must be below 3%)
-        thd_freq_range: (low_hz, high_hz) — evaluation window for THD
-        thd_ppo:        Points per octave for distortion data from REW
-        metadata:       Optional dict for part numbers, spec docs, notes
+        name:            Display name (shown on plots and reports)
+        version:         Version string for traceability
+        freq_hz:         Anchor frequencies in Hz (monotonically increasing)
+        upper_db:        Upper dB SPL limit at each anchor frequency
+        lower_db:        Lower dB SPL limit at each anchor frequency
+        smoothing:       Smoothing to request from REW (e.g. "1/12", "1/3")
+        ppo:             Points per octave for the frequency response data
+        freq_range:      (low_hz, high_hz) — evaluation window for magnitude
+        thd_freq_hz:     Anchor frequencies for THD limits (Hz)
+        thd_max_pct:     Maximum THD (%) at each anchor frequency
+                         (e.g. 3.0 = THD must be below 3%)
+        thd_freq_range:  (low_hz, high_hz) — evaluation window for THD
+        thd_ppo:         Points per octave for distortion data from REW
+        thd_harmonics:   Harmonics expected in REW's THD aggregate, info-only
+                         (default ["H2".."H9"]). REW already aggregates THD
+                         in its column 2 output, so this is metadata.
+        hohd_freq_hz:    Anchor frequencies for HOHD limits (Hz)
+        hohd_max_pct:    Maximum HOHD (%) at each anchor frequency
+        hohd_freq_range: (low_hz, high_hz) — evaluation window for HOHD
+        hohd_ppo:        Points per octave for distortion data (HOHD)
+        hohd_harmonics:  Harmonic columns to aggregate into HOHD via
+                         sqrt(sum(Hn^2)). Default ["H10".."H15"].
+        metadata:        Optional dict for part numbers, spec docs, notes
     """
     name: str
     version: str
@@ -135,11 +149,26 @@ class LimitMask:
     thd_max_pct: np.ndarray = field(default_factory=lambda: np.array([]))
     thd_freq_range: Tuple[float, float] = (200, 10000)
     thd_ppo: int = 12
+    thd_harmonics: List[str] = field(
+        default_factory=lambda: ["H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]
+    )
+    # HOHD limits (optional — if hohd_freq_hz is empty, HOHD is not checked)
+    hohd_freq_hz: np.ndarray = field(default_factory=lambda: np.array([]))
+    hohd_max_pct: np.ndarray = field(default_factory=lambda: np.array([]))
+    hohd_freq_range: Tuple[float, float] = (200, 8000)
+    hohd_ppo: int = 12
+    hohd_harmonics: List[str] = field(
+        default_factory=lambda: ["H10", "H11", "H12", "H13", "H14", "H15"]
+    )
     metadata: Dict = field(default_factory=dict)
 
     @property
     def has_thd_limits(self) -> bool:
         return len(self.thd_freq_hz) > 0
+
+    @property
+    def has_hohd_limits(self) -> bool:
+        return len(self.hohd_freq_hz) > 0
 
     def check_magnitude(self, freq_hz: np.ndarray, mag_db: np.ndarray):
         """Check if a frequency response falls within the magnitude envelope.
@@ -238,6 +267,52 @@ class LimitMask:
             "points_evaluated": int(np.sum(idx)),
         }
 
+    def check_hohd(self, hohd_freq_hz: np.ndarray, hohd_pct: np.ndarray):
+        """Check if HOHD falls below the maximum limit at each frequency.
+
+        HOHD (Higher-Order Harmonic Distortion) is computed upstream
+        from REW's per-harmonic data via sqrt(sum(Hn^2)) over the
+        harmonics listed in mask.hohd_harmonics.
+
+        Args:
+            hohd_freq_hz: Frequency axis from REW distortion data (Hz)
+            hohd_pct:     Aggregate HOHD values in percent
+
+        Returns:
+            (passed: bool, details: dict)
+        """
+        if not self.has_hohd_limits:
+            return True, {"passed": True, "violations": [], "points_evaluated": 0}
+
+        f_lo, f_hi = self.hohd_freq_range
+        idx = (hohd_freq_hz >= f_lo) & (hohd_freq_hz <= f_hi)
+        f = hohd_freq_hz[idx]
+        h = hohd_pct[idx]
+
+        limit = np.interp(f, self.hohd_freq_hz, self.hohd_max_pct)
+        over = h > limit
+
+        violations = []
+        if np.any(over):
+            worst_idx = np.argmax(h - limit)
+            violations.append({
+                "type": "HOHD",
+                "freq_hz": float(f[np.where(over)[0][0]]),
+                "worst_freq_hz": float(f[worst_idx]),
+                "worst_hohd_pct": float(h[worst_idx]),
+                "worst_limit_pct": float(limit[worst_idx]),
+                "worst_delta_pct": float(h[worst_idx] - limit[worst_idx]),
+                "count": int(np.sum(over)),
+            })
+
+        passed = len(violations) == 0
+        return passed, {
+            "passed": passed,
+            "violations": violations,
+            "eval_range": (f_lo, f_hi),
+            "points_evaluated": int(np.sum(idx)),
+        }
+
 
 @dataclass
 class IQCResult:
@@ -261,6 +336,10 @@ class IQCResult:
     mag_db: np.ndarray
     thd_freq_hz: np.ndarray      # empty if no distortion data
     thd_pct: np.ndarray           # THD in percent; empty if no distortion data
+    hohd_passed: bool = True
+    hohd_details: Dict = field(default_factory=lambda: {"passed": True, "violations": [], "points_evaluated": 0})
+    hohd_freq_hz: np.ndarray = field(default_factory=lambda: np.array([]))
+    hohd_pct: np.ndarray = field(default_factory=lambda: np.array([]))
     plot_path: Optional[str] = None
 
 
@@ -403,7 +482,7 @@ class REWClient:
         unit: str = "percent",
         ppo: int = 12,
     ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Fetch distortion data from REW.
+        """Fetch THD distortion data from REW (legacy convenience wrapper).
 
         Args:
             id_or_uuid: Measurement index or UUID
@@ -416,9 +495,34 @@ class REWClient:
                 - thd_values: THD from column 2 (in requested unit)
                 - column_headers: all column names for reference
 
-        The full data array also contains Fundamental, Noise, and
-        individual harmonics H2-H9, but we extract just THD here.
-        Additional columns can be accessed by extending this method.
+        For per-harmonic access (needed for HOHD), use get_distortion_full().
+        """
+        freq, harmonics, headers = self.get_distortion_full(
+            id_or_uuid, unit=unit, ppo=ppo
+        )
+        thd = harmonics.get("THD", np.array([]))
+        return freq, thd, headers
+
+    def get_distortion_full(
+        self,
+        id_or_uuid: str,
+        unit: str = "percent",
+        ppo: int = 12,
+    ) -> Tuple[np.ndarray, Dict[str, np.ndarray], List[str]]:
+        """Fetch full distortion data including per-harmonic columns.
+
+        Returns:
+            (freq_hz, harmonics, column_headers) where:
+                - freq_hz:    frequency axis (Hz)
+                - harmonics:  dict keyed by short column name like
+                              "Fundamental", "THD", "Noise", "H2", "H3", ...
+                              Each value is a numpy array aligned with freq_hz.
+                              If REW didn't supply a harmonic at a particular
+                              frequency, that entry is NaN.
+                - column_headers: original column header strings from REW
+
+        REW returns ragged rows (some frequencies may lack higher harmonics).
+        We allocate the full grid as NaN and fill in available cells.
         """
         params = {"unit": unit, "ppo": ppo}
         data = self._get("/measurements/{}/distortion".format(id_or_uuid), **params)
@@ -426,27 +530,62 @@ class REWClient:
         headers = data.get("columnHeaders", [])
         rows = data.get("data", [])
 
-        if not rows:
-            return np.array([]), np.array([]), headers
+        if not rows or not headers:
+            return np.array([]), {}, headers
 
-        # Some rows may have fewer columns (missing harmonics at certain
-        # frequencies) or contain None values. Extract just the columns
-        # we need (0=freq, 2=THD) and skip any rows with missing data.
+        # Map full header strings to short keys (e.g. "H2 (dBr)" -> "H2",
+        # "THD (%)" -> "THD", "Fundamental (dB)" -> "Fundamental")
+        short_keys = []
+        for h in headers:
+            # Take the part before any space-paren (units block)
+            if "(" in h:
+                key = h.split("(")[0].strip()
+            else:
+                key = h.strip()
+            short_keys.append(key)
+
+        # Allocate freq + per-column buffers
         freq_list = []
-        thd_list = []
+        n_cols = len(headers)
+        # First pass: collect valid frequencies
+        valid_rows = []
         for row in rows:
-            if row is None or len(row) < 3:
+            if row is None or len(row) < 1:
                 continue
             f = row[0]
-            t = row[2]
-            if f is not None and t is not None:
+            if f is None:
+                continue
+            try:
                 freq_list.append(float(f))
-                thd_list.append(float(t))
+                valid_rows.append(row)
+            except (TypeError, ValueError):
+                continue
+
+        if not freq_list:
+            return np.array([]), {}, headers
 
         freq = np.array(freq_list, dtype=np.float64)
-        thd = np.array(thd_list, dtype=np.float64)
+        n_pts = len(freq)
 
-        return freq, thd, headers
+        # Initialize per-column arrays as NaN; skip the first column (freq)
+        harmonics: Dict[str, np.ndarray] = {}
+        for c in range(1, n_cols):
+            harmonics[short_keys[c]] = np.full(n_pts, np.nan, dtype=np.float64)
+
+        # Fill in values where present
+        for i, row in enumerate(valid_rows):
+            for c in range(1, n_cols):
+                if c >= len(row):
+                    continue
+                v = row[c]
+                if v is None:
+                    continue
+                try:
+                    harmonics[short_keys[c]][i] = float(v)
+                except (TypeError, ValueError):
+                    pass
+
+        return freq, harmonics, headers
 
     # -- Measurement control (requires REW Pro license) ---------------------
 
@@ -499,6 +638,61 @@ class REWClient:
 
 
 # ---------------------------------------------------------------------------
+# Distortion math helpers
+# ---------------------------------------------------------------------------
+
+def aggregate_harmonics_pct(
+    harmonics: Dict[str, np.ndarray],
+    selected: List[str],
+) -> Tuple[np.ndarray, List[str], List[str]]:
+    """Aggregate selected harmonic columns into a single distortion %.
+
+    Combines harmonics by sqrt(sum of squares), the standard total-distortion
+    formula, when the values are already in percent.
+
+    Args:
+        harmonics: dict from REWClient.get_distortion_full(), keyed like
+                   "H2", "H3", ..., values are np.ndarray of % per frequency
+                   (with NaN where REW didn't supply that harmonic)
+        selected:  list of harmonic short names the user wants aggregated,
+                   e.g. ["H10", "H11", "H12", "H13", "H14", "H15"]
+
+    Returns:
+        (aggregate_pct, found, missing) where:
+            - aggregate_pct: np.ndarray of aggregate distortion % per
+                             frequency point (NaN where no selected
+                             harmonics were available)
+            - found:   list of harmonic names actually used
+            - missing: list of harmonic names that were requested but not
+                       present in REW's data (may be empty)
+
+    Notes:
+        - When a particular harmonic has NaN at some frequencies (REW
+          ragged data), those NaNs are treated as 0 in the sum so the
+          aggregate uses whatever is available.
+        - If no requested harmonic exists in the data at all, returns an
+          empty array.
+    """
+    found = [h for h in selected if h in harmonics]
+    missing = [h for h in selected if h not in harmonics]
+
+    if not found:
+        return np.array([]), found, missing
+
+    # Stack the selected harmonic % values; replace NaN with 0 for the sum.
+    stack = np.vstack([np.nan_to_num(harmonics[h], nan=0.0) for h in found])
+    # sqrt(sum of squares) = sqrt(stack ** 2).sum(axis=0)
+    aggregate = np.sqrt(np.sum(stack ** 2, axis=0))
+
+    # If every selected harmonic was NaN at a given frequency, mark NaN.
+    presence = np.vstack([~np.isnan(harmonics[h]) for h in found])
+    no_data = ~np.any(presence, axis=0)
+    aggregate[no_data] = np.nan
+
+    return aggregate, found, missing
+
+
+# ---------------------------------------------------------------------------
 # Limit mask I/O
 # ---------------------------------------------------------------------------
 
@@ -506,29 +700,60 @@ def load_limit_mask(path: Union[str, Path]) -> LimitMask:
     """Load a limit mask from a JSON file.
 
     The JSON can optionally include a "thd_limits" section for THD
-    evaluation. If omitted, only magnitude is checked.
+    evaluation, and an "hohd_limits" section for HOHD (higher-order
+    harmonic distortion). If a section is omitted, that check is skipped.
     """
     p = Path(path)
     with open(p, "r") as f:
         d = json.load(f)
 
     pts = d["limits"]
+    # Upper/lower at each freq are individually optional. A point with only
+    # `upper_db` means "no lower bound here" (effectively -inf); a point with
+    # only `lower_db` means "no upper bound here" (effectively +inf). Missing
+    # both is equivalent to "no constraint at this frequency" — harmless but
+    # pointless. check_magnitude treats inf bounds as never-violated.
     freq = np.array([pt["freq_hz"] for pt in pts], dtype=np.float64)
-    upper = np.array([pt["upper_db"] for pt in pts], dtype=np.float64)
-    lower = np.array([pt["lower_db"] for pt in pts], dtype=np.float64)
+    upper = np.array(
+        [pt.get("upper_db", np.inf) for pt in pts], dtype=np.float64
+    )
+    lower = np.array(
+        [pt.get("lower_db", -np.inf) for pt in pts], dtype=np.float64
+    )
 
     # THD limits are optional
     thd_freq = np.array([])
     thd_max = np.array([])
     thd_range = (200, 10000)
     thd_ppo = 12
+    thd_harmonics = ["H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"]
     if "thd_limits" in d:
         thd_section = d["thd_limits"]
         thd_pts = thd_section.get("limits", [])
         thd_freq = np.array([pt["freq_hz"] for pt in thd_pts], dtype=np.float64)
-        thd_max = np.array([pt["max_thd_pct"] for pt in thd_pts], dtype=np.float64)
+        thd_max = np.array(
+            [pt.get("max_thd_pct", np.inf) for pt in thd_pts], dtype=np.float64
+        )
         thd_range = tuple(thd_section.get("freq_range_hz", [200, 10000]))
         thd_ppo = thd_section.get("ppo", 12)
+        thd_harmonics = thd_section.get("harmonics", thd_harmonics)
+
+    # HOHD limits are optional
+    hohd_freq = np.array([])
+    hohd_max = np.array([])
+    hohd_range = (200, 8000)
+    hohd_ppo = 12
+    hohd_harmonics = ["H10", "H11", "H12", "H13", "H14", "H15"]
+    if "hohd_limits" in d:
+        hohd_section = d["hohd_limits"]
+        hohd_pts = hohd_section.get("limits", [])
+        hohd_freq = np.array([pt["freq_hz"] for pt in hohd_pts], dtype=np.float64)
+        hohd_max = np.array(
+            [pt.get("max_hohd_pct", np.inf) for pt in hohd_pts], dtype=np.float64
+        )
+        hohd_range = tuple(hohd_section.get("freq_range_hz", [200, 8000]))
+        hohd_ppo = hohd_section.get("ppo", 12)
+        hohd_harmonics = hohd_section.get("harmonics", hohd_harmonics)
 
     return LimitMask(
         name=d.get("name", p.stem),
@@ -543,16 +768,23 @@ def load_limit_mask(path: Union[str, Path]) -> LimitMask:
         thd_max_pct=thd_max,
         thd_freq_range=thd_range,
         thd_ppo=thd_ppo,
+        thd_harmonics=thd_harmonics,
+        hohd_freq_hz=hohd_freq,
+        hohd_max_pct=hohd_max,
+        hohd_freq_range=hohd_range,
+        hohd_ppo=hohd_ppo,
+        hohd_harmonics=hohd_harmonics,
         metadata=d.get("metadata", {}),
     )
 
 
 def create_example_limit_mask(path: Union[str, Path]):
-    """Generate an example speaker limit mask JSON file with THD limits.
+    """Generate an example speaker limit mask JSON file with THD + HOHD limits.
 
     Creates a generic envelope centered around ~75 dB SPL at 1 kHz
-    with +/-5 dB tolerance in the midband, plus a THD ceiling of
-    3% in the midband relaxing to 10% at the frequency extremes.
+    with +/-5 dB tolerance in the midband, a THD ceiling of 3% in the
+    midband relaxing to 10% at the frequency extremes, and a HOHD ceiling
+    that's tighter (since higher-order distortion is typically lower).
     """
     freqs = [200, 300, 500, 700, 1000, 1500, 2000, 3000, 4000, 5000,
              6000, 8000, 10000, 12000, 14000, 16000]
@@ -570,7 +802,7 @@ def create_example_limit_mask(path: Union[str, Path]):
 
     mask = {
         "name": "Speaker IQC - Example",
-        "version": "1.1",
+        "version": "1.2",
         "smoothing": "1/12",
         "ppo": 48,
         "freq_range_hz": [200, 16000],
@@ -578,6 +810,7 @@ def create_example_limit_mask(path: Union[str, Path]):
         "thd_limits": {
             "freq_range_hz": [200, 10000],
             "ppo": 12,
+            "harmonics": ["H2", "H3", "H4", "H5", "H6", "H7", "H8", "H9"],
             "limits": [
                 {"freq_hz": 200,   "max_thd_pct": 10.0},
                 {"freq_hz": 500,   "max_thd_pct": 5.0},
@@ -587,12 +820,26 @@ def create_example_limit_mask(path: Union[str, Path]):
                 {"freq_hz": 10000, "max_thd_pct": 10.0}
             ]
         },
+        "hohd_limits": {
+            "freq_range_hz": [200, 8000],
+            "ppo": 12,
+            "harmonics": ["H10", "H11", "H12", "H13", "H14", "H15"],
+            "limits": [
+                {"freq_hz": 200,   "max_hohd_pct": 2.0},
+                {"freq_hz": 500,   "max_hohd_pct": 1.0},
+                {"freq_hz": 1000,  "max_hohd_pct": 0.5},
+                {"freq_hz": 2000,  "max_hohd_pct": 0.5},
+                {"freq_hz": 5000,  "max_hohd_pct": 1.0},
+                {"freq_hz": 8000,  "max_hohd_pct": 2.0}
+            ]
+        },
         "metadata": {
             "part_number": "SPK-EXAMPLE",
-            "notes": "Example mask with magnitude and THD limits. "
-                     "THD limit is relaxed at LF and HF where distortion "
-                     "is naturally higher (10% at extremes, 3% midband). "
-                     "Adjust to your DUT population."
+            "notes": "Example mask with magnitude, THD, and HOHD limits. "
+                     "THD uses REW's pre-aggregated THD column (H2-H9 by "
+                     "default in REW). HOHD is computed by sqrt-sum-of-"
+                     "squares of H10-H15; this requires REW to be configured "
+                     "to report higher harmonics. Adjust to your DUT population."
         }
     }
 
@@ -624,29 +871,64 @@ def plot_result(
         return None
 
     has_thd = mask.has_thd_limits and len(result.thd_freq_hz) > 0 and len(result.thd_pct) > 0
+    has_hohd = mask.has_hohd_limits and len(result.hohd_freq_hz) > 0 and len(result.hohd_pct) > 0
 
-    if has_thd:
-        # Two-panel plot: magnitude on top (taller), THD on bottom
-        fig, (ax_mag, ax_thd) = plt.subplots(
-            2, 1, figsize=(14, 9), height_ratios=[3, 2],
-            sharex=True,
+    n_panels = 1 + (1 if has_thd else 0) + (1 if has_hohd else 0)
+
+    if n_panels == 3:
+        fig, (ax_mag, ax_thd, ax_hohd) = plt.subplots(
+            3, 1, figsize=(14, 11), height_ratios=[3, 2, 2], sharex=True,
         )
+    elif n_panels == 2 and has_thd:
+        fig, (ax_mag, ax_thd) = plt.subplots(
+            2, 1, figsize=(14, 9), height_ratios=[3, 2], sharex=True,
+        )
+        ax_hohd = None
+    elif n_panels == 2 and has_hohd:
+        # HOHD-only second panel (rare, but possible)
+        fig, (ax_mag, ax_hohd) = plt.subplots(
+            2, 1, figsize=(14, 9), height_ratios=[3, 2], sharex=True,
+        )
+        ax_thd = None
     else:
         fig, ax_mag = plt.subplots(figsize=(14, 7))
         ax_thd = None
+        ax_hohd = None
 
     # =====================================================================
     # TOP PANEL: Magnitude frequency response
     # =====================================================================
 
     # Limit mask envelope
+    # Bounds may contain +/-inf at frequencies where one side wasn't defined
+    # (e.g. an upper-only mask, or a sparse-data mask where one curve ran
+    # out before the other). For plotting we substitute "off-screen" values
+    # so fill_between still works and auto-scaling isn't pulled to infinity.
     mask_freq = mask.freq_hz
-    ax_mag.fill_between(mask_freq, mask.lower_db, mask.upper_db,
+    finite_mask_vals = []
+    if np.any(np.isfinite(mask.upper_db)):
+        finite_mask_vals.extend(mask.upper_db[np.isfinite(mask.upper_db)].tolist())
+    if np.any(np.isfinite(mask.lower_db)):
+        finite_mask_vals.extend(mask.lower_db[np.isfinite(mask.lower_db)].tolist())
+    if finite_mask_vals:
+        finite_lo = min(finite_mask_vals)
+        finite_hi = max(finite_mask_vals)
+    else:
+        finite_lo, finite_hi = 0.0, 100.0
+    plot_upper = np.where(np.isfinite(mask.upper_db), mask.upper_db, finite_hi + 50)
+    plot_lower = np.where(np.isfinite(mask.lower_db), mask.lower_db, finite_lo - 50)
+
+    ax_mag.fill_between(mask_freq, plot_lower, plot_upper,
                          alpha=0.15, color="#2196F3", label="Limit mask")
-    ax_mag.plot(mask_freq, mask.upper_db, color="#1565C0", linewidth=1.5,
-                linestyle="--", alpha=0.7)
-    ax_mag.plot(mask_freq, mask.lower_db, color="#1565C0", linewidth=1.5,
-                linestyle="--", alpha=0.7)
+    # Only draw the boundary line where it's actually defined
+    if np.any(np.isfinite(mask.upper_db)):
+        ax_mag.plot(mask_freq, np.where(np.isfinite(mask.upper_db),
+                                         mask.upper_db, np.nan),
+                    color="#1565C0", linewidth=1.5, linestyle="--", alpha=0.7)
+    if np.any(np.isfinite(mask.lower_db)):
+        ax_mag.plot(mask_freq, np.where(np.isfinite(mask.lower_db),
+                                         mask.lower_db, np.nan),
+                    color="#1565C0", linewidth=1.5, linestyle="--", alpha=0.7)
 
     # Measurement trace (green = pass, red = fail for overall result)
     trace_color = "#4CAF50" if result.passed else "#F44336"
@@ -680,15 +962,22 @@ def plot_result(
     mask_in_range = (mask.freq_hz >= x_lo) & (mask.freq_hz <= x_hi)
     mask_upper_in_range = mask.upper_db[mask_in_range]
     mask_lower_in_range = mask.lower_db[mask_in_range]
+    # Drop infinities before computing y-range
+    mask_upper_finite = mask_upper_in_range[np.isfinite(mask_upper_in_range)]
+    mask_lower_finite = mask_lower_in_range[np.isfinite(mask_lower_in_range)]
 
-    all_mins = [np.min(mask_lower_in_range)]
-    all_maxs = [np.max(mask_upper_in_range)]
+    all_mins = []
+    all_maxs = []
+    if len(mask_lower_finite) > 0:
+        all_mins.append(np.min(mask_lower_finite))
+    if len(mask_upper_finite) > 0:
+        all_maxs.append(np.max(mask_upper_finite))
     if len(data_in_range) > 0:
         all_mins.append(np.min(data_in_range))
         all_maxs.append(np.max(data_in_range))
 
-    y_lo = min(all_mins) - 5
-    y_hi = max(all_maxs) + 5
+    y_lo = min(all_mins) - 5 if all_mins else 0
+    y_hi = max(all_maxs) + 5 if all_maxs else 100
     ax_mag.set_ylim(y_lo, y_hi)
 
     # Large solid PASS/FAIL badge (top-left corner)
@@ -730,11 +1019,11 @@ def plot_result(
     ax_mag.legend(loc="lower left", fontsize=10)
     ax_mag.grid(True, which="both", alpha=0.3)
 
-    if not has_thd:
+    if n_panels == 1:
         ax_mag.set_xlabel("Frequency (Hz)", fontsize=12)
 
     # =====================================================================
-    # BOTTOM PANEL: THD (only if mask has THD limits and data exists)
+    # MIDDLE PANEL: THD (only if mask has THD limits and data exists)
     # =====================================================================
 
     if has_thd and ax_thd is not None:
@@ -770,7 +1059,9 @@ def plot_result(
 
         # THD panel formatting
         ax_thd.set_xlim(100, 20000)
-        ax_thd.set_xlabel("Frequency (Hz)", fontsize=12)
+        # Bottom panel gets the x-label only if there's no HOHD panel below
+        if not has_hohd:
+            ax_thd.set_xlabel("Frequency (Hz)", fontsize=12)
         ax_thd.set_ylabel("THD (%)", fontsize=12)
         ax_thd.legend(loc="upper left", fontsize=10)
         ax_thd.grid(True, which="both", alpha=0.3)
@@ -794,6 +1085,70 @@ def plot_result(
             fontfamily="monospace",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                       edgecolor=thd_badge_color, alpha=0.9),
+        )
+
+    # =====================================================================
+    # BOTTOM PANEL: HOHD (only if mask has HOHD limits and data exists)
+    # =====================================================================
+
+    if has_hohd and ax_hohd is not None:
+        # HOHD limit line
+        ax_hohd.semilogx(mask.hohd_freq_hz, mask.hohd_max_pct,
+                          color="#6A1B9A", linewidth=2, linestyle="--",
+                          label="HOHD limit", alpha=0.8)
+
+        # Fill above the limit to show the fail zone
+        hohd_fill_top = max(np.max(mask.hohd_max_pct) * 3, 5)
+        ax_hohd.fill_between(mask.hohd_freq_hz, mask.hohd_max_pct, hohd_fill_top,
+                              alpha=0.08, color="#F44336")
+
+        # HOHD measurement trace
+        hohd_color = "#4CAF50" if result.hohd_passed else "#F44336"
+        harmonics_label = ", ".join(mask.hohd_harmonics)
+        ax_hohd.semilogx(result.hohd_freq_hz, result.hohd_pct,
+                          color=hohd_color, linewidth=2,
+                          label="HOHD [{}]".format(harmonics_label))
+
+        # HOHD violation markers
+        if not result.hohd_passed:
+            for v in result.hohd_details.get("violations", []):
+                ax_hohd.axvline(x=v["worst_freq_hz"], color="#F44336",
+                                 alpha=0.3, linestyle=":")
+                ax_hohd.annotate(
+                    "HOHD {:.2f}% (limit {:.2f}%)".format(
+                        v["worst_hohd_pct"], v["worst_limit_pct"]
+                    ),
+                    xy=(v["worst_freq_hz"], v["worst_hohd_pct"]),
+                    fontsize=9, color="#F44336", fontweight="bold",
+                    ha="center", va="bottom",
+                )
+
+        # HOHD panel formatting
+        ax_hohd.set_xlim(100, 20000)
+        ax_hohd.set_xlabel("Frequency (Hz)", fontsize=12)
+        ax_hohd.set_ylabel("HOHD (%)", fontsize=12)
+        ax_hohd.legend(loc="upper left", fontsize=10)
+        ax_hohd.grid(True, which="both", alpha=0.3)
+
+        # Auto-scale HOHD Y axis
+        hohd_lo, hohd_hi = mask.hohd_freq_range
+        hohd_in_range = (result.hohd_freq_hz >= hohd_lo) & (result.hohd_freq_hz <= hohd_hi)
+        if np.any(hohd_in_range):
+            hohd_data_max = np.max(result.hohd_pct[hohd_in_range])
+            hohd_limit_max = np.max(mask.hohd_max_pct)
+            y_top = max(hohd_data_max, hohd_limit_max) * 1.3
+            ax_hohd.set_ylim(0, max(y_top, 0.5))
+
+        # Small pass/fail badge for HOHD panel
+        hohd_verdict = "HOHD PASS" if result.hohd_passed else "HOHD FAIL"
+        hohd_badge_color = "#4CAF50" if result.hohd_passed else "#F44336"
+        ax_hohd.text(
+            0.98, 0.95, hohd_verdict,
+            transform=ax_hohd.transAxes, fontsize=14, fontweight="bold",
+            color=hohd_badge_color, ha="right", va="top",
+            fontfamily="monospace",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor=hohd_badge_color, alpha=0.9),
         )
 
     fig.tight_layout()
@@ -826,8 +1181,8 @@ def open_plot(plot_path: str):
 def write_csv_report(results: List[IQCResult], path: Union[str, Path]):
     """Append IQC results to a daily CSV report file.
 
-    Columns: timestamp, measurement_name, uuid, limit_mask,
-             result, mag_result, thd_result, violations_summary, plot_file
+    Columns: timestamp, serial_number, measurement_name, uuid, limit_mask,
+             result, mag_result, thd_result, hohd_result, violations_summary, plot_file
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -838,14 +1193,15 @@ def write_csv_report(results: List[IQCResult], path: Union[str, Path]):
         if not file_exists:
             writer.writerow([
                 "timestamp", "serial_number", "measurement_name", "uuid",
-                "limit_mask", "result", "mag_result", "thd_result",
+                "limit_mask", "result", "mag_result", "thd_result", "hohd_result",
                 "violations_summary", "plot_file",
             ])
         for r in results:
-            # Combine magnitude and THD violations into one summary
+            # Combine magnitude, THD, and HOHD violations into one summary
             all_violations = (
                 r.mag_details.get("violations", []) +
-                r.thd_details.get("violations", [])
+                r.thd_details.get("violations", []) +
+                r.hohd_details.get("violations", [])
             )
             vsummary_parts = []
             for v in all_violations:
@@ -863,6 +1219,13 @@ def write_csv_report(results: List[IQCResult], path: Union[str, Path]):
                             tl=v["worst_limit_pct"], c=v["count"]
                         )
                     )
+                elif v["type"] == "HOHD":
+                    vsummary_parts.append(
+                        "HOHD worst={wf:.0f}Hz hohd={hd:.2f}% limit={hl:.2f}% (n={c})".format(
+                            wf=v["worst_freq_hz"], hd=v["worst_hohd_pct"],
+                            hl=v["worst_limit_pct"], c=v["count"]
+                        )
+                    )
             vsummary = "; ".join(vsummary_parts) or "none"
 
             writer.writerow([
@@ -871,6 +1234,7 @@ def write_csv_report(results: List[IQCResult], path: Union[str, Path]):
                 "PASS" if r.passed else "FAIL",
                 "PASS" if r.mag_passed else "FAIL",
                 "PASS" if r.thd_passed else "FAIL",
+                "PASS" if r.hohd_passed else "FAIL",
                 vsummary, r.plot_path or "",
             ])
     log.info("Report updated: {}".format(p))
@@ -895,7 +1259,7 @@ class IQCEngine:
         save_plot: bool = True,
         show_plot: bool = False,
     ) -> IQCResult:
-        """Evaluate a single measurement against magnitude and THD limits."""
+        """Evaluate a single measurement against magnitude, THD, and HOHD limits."""
         summary = self.rew.get_measurement(id_or_uuid)
         name = summary.get("title", "meas_{}".format(id_or_uuid))
         uuid = summary.get("uuid", str(id_or_uuid))
@@ -913,28 +1277,85 @@ class IQCEngine:
         # --- Evaluate magnitude ---
         mag_passed, mag_details = self.mask.check_magnitude(freq, mag)
 
-        # --- Fetch and evaluate THD (if mask has THD limits) ---
+        # --- Fetch distortion data once if any distortion check is needed ---
         thd_freq = np.array([])
         thd_pct = np.array([])
         thd_passed = True
         thd_details = {"passed": True, "violations": [], "points_evaluated": 0}
 
-        if self.mask.has_thd_limits:
+        hohd_freq = np.array([])
+        hohd_pct = np.array([])
+        hohd_passed = True
+        hohd_details = {"passed": True, "violations": [], "points_evaluated": 0}
+
+        need_distortion = self.mask.has_thd_limits or self.mask.has_hohd_limits
+        if need_distortion:
+            # Use the higher of the two PPO values so a single fetch serves both.
+            dist_ppo = max(self.mask.thd_ppo, self.mask.hohd_ppo) if (
+                self.mask.has_thd_limits and self.mask.has_hohd_limits
+            ) else (self.mask.hohd_ppo if self.mask.has_hohd_limits else self.mask.thd_ppo)
             try:
-                thd_freq, thd_pct, _headers = self.rew.get_distortion(
-                    id_or_uuid,
-                    unit="percent",
-                    ppo=self.mask.thd_ppo,
+                dist_freq, harmonics, _headers = self.rew.get_distortion_full(
+                    id_or_uuid, unit="percent", ppo=dist_ppo,
                 )
-                if len(thd_freq) > 0:
-                    thd_passed, thd_details = self.mask.check_thd(thd_freq, thd_pct)
-                else:
-                    log.warning("  No distortion data available for this measurement")
+
+                # --- Evaluate THD using REW's pre-aggregated THD column ---
+                if self.mask.has_thd_limits:
+                    thd_col = harmonics.get("THD", np.array([]))
+                    if len(dist_freq) > 0 and len(thd_col) > 0:
+                        # Strip any NaN points from THD (REW returns ragged
+                        # data — some frequencies have valid THD, some don't)
+                        valid = ~np.isnan(thd_col)
+                        thd_freq = dist_freq[valid]
+                        thd_pct = thd_col[valid]
+                        if len(thd_freq) > 0:
+                            thd_passed, thd_details = self.mask.check_thd(
+                                thd_freq, thd_pct
+                            )
+                        else:
+                            log.warning("  No valid THD data points available")
+                    else:
+                        log.warning("  THD column missing from REW response")
+
+                # --- Evaluate HOHD by aggregating selected harmonic columns ---
+                if self.mask.has_hohd_limits:
+                    aggregate, found, missing = aggregate_harmonics_pct(
+                        harmonics, self.mask.hohd_harmonics
+                    )
+                    if missing:
+                        log.warning(
+                            "  HOHD: {} not present in REW data (configure REW "
+                            "to report higher harmonics for full HOHD coverage)"
+                            .format(", ".join(missing))
+                        )
+                    if len(aggregate) > 0:
+                        # Drop any all-NaN points (no harmonic data at all)
+                        valid = ~np.isnan(aggregate)
+                        hohd_freq = dist_freq[valid]
+                        hohd_pct = aggregate[valid]
+                        if len(hohd_freq) > 0 and found:
+                            log.info("  HOHD aggregating: {}".format(
+                                ", ".join(found)
+                            ))
+                            hohd_passed, hohd_details = self.mask.check_hohd(
+                                hohd_freq, hohd_pct
+                            )
+                        else:
+                            log.warning("  No HOHD data available — skipping HOHD check")
+                            hohd_passed = True  # don't fail if no data
+                    else:
+                        log.warning(
+                            "  HOHD: none of the requested harmonics ({}) "
+                            "are present in REW data".format(
+                                ", ".join(self.mask.hohd_harmonics)
+                            )
+                        )
+                        hohd_passed = True
             except Exception as e:
                 log.warning("  Could not fetch distortion data: {}".format(e))
 
-        # --- Overall verdict: must pass BOTH magnitude and THD ---
-        passed = mag_passed and thd_passed
+        # --- Overall verdict: must pass magnitude AND THD AND HOHD ---
+        passed = mag_passed and thd_passed and hohd_passed
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         result = IQCResult(
@@ -952,6 +1373,10 @@ class IQCEngine:
             mag_db=mag,
             thd_freq_hz=thd_freq,
             thd_pct=thd_pct,
+            hohd_passed=hohd_passed,
+            hohd_details=hohd_details,
+            hohd_freq_hz=hohd_freq,
+            hohd_pct=hohd_pct,
         )
 
         # Generate and save the plot
@@ -996,6 +1421,17 @@ class IQCEngine:
                         "    THD violation: worst at {:.0f} Hz, "
                         "THD={:.1f}%, limit={:.1f}% ({} points)".format(
                             v["worst_freq_hz"], v["worst_thd_pct"],
+                            v["worst_limit_pct"], v["count"]
+                        )
+                    )
+        if self.mask.has_hohd_limits:
+            log.info("  HOHD: {}".format("PASS" if hohd_passed else "FAIL"))
+            if not hohd_passed:
+                for v in hohd_details["violations"]:
+                    log.info(
+                        "    HOHD violation: worst at {:.0f} Hz, "
+                        "HOHD={:.2f}%, limit={:.2f}% ({} points)".format(
+                            v["worst_freq_hz"], v["worst_hohd_pct"],
                             v["worst_limit_pct"], v["count"]
                         )
                     )
@@ -1060,14 +1496,25 @@ def operator_loop(mask_path: str, show_plots: bool = False, auto_measure: bool =
         log.info("  THD eval range: {}-{} Hz".format(
             mask.thd_freq_range[0], mask.thd_freq_range[1]))
     else:
-        log.info("  THD limits: not defined (magnitude only)")
+        log.info("  THD limits: not defined")
+    if mask.has_hohd_limits:
+        log.info("  HOHD eval range: {}-{} Hz (harmonics: {})".format(
+            mask.hohd_freq_range[0], mask.hohd_freq_range[1],
+            ", ".join(mask.hohd_harmonics)))
+    else:
+        log.info("  HOHD limits: not defined")
 
     engine = IQCEngine(rew, mask)
     ts = datetime.now().strftime("%Y%m%d")
     report_path = REPORT_DIR / "iqc_report_{}.csv".format(ts)
 
     mode_label = "AUTO-MEASURE" if auto_measure else "MANUAL"
-    checks = "Magnitude + THD" if mask.has_thd_limits else "Magnitude only"
+    check_parts = ["Magnitude"]
+    if mask.has_thd_limits:
+        check_parts.append("THD")
+    if mask.has_hohd_limits:
+        check_parts.append("HOHD")
+    checks = " + ".join(check_parts)
     print("\n" + "=" * 60)
     print("  REW IQC TOOL -- OPERATOR MODE ({})".format(mode_label))
     print("  Limit mask: {} v{}".format(mask.name, mask.version))
@@ -1132,6 +1579,12 @@ def operator_loop(mask_path: str, show_plots: bool = False, auto_measure: bool =
                 for v in result.thd_details.get("violations", []):
                     print("  THD: worst {:.0f} Hz ({:.1f}%, limit {:.1f}%), {} pts".format(
                         v["worst_freq_hz"], v["worst_thd_pct"],
+                        v["worst_limit_pct"], v["count"]
+                    ))
+                # Print HOHD violations
+                for v in result.hohd_details.get("violations", []):
+                    print("  HOHD: worst {:.0f} Hz ({:.2f}%, limit {:.2f}%), {} pts".format(
+                        v["worst_freq_hz"], v["worst_hohd_pct"],
                         v["worst_limit_pct"], v["count"]
                     ))
                 print()

@@ -1,42 +1,180 @@
 {
-  "name": "Speaker IQC",
-  "version": "1.0",
+  "name": "Speaker IQC - Example",
+  "version": "1.2",
   "smoothing": "1/12",
   "ppo": 48,
-  "freq_range_hz": [200, 16000],
+  "freq_range_hz": [
+    200,
+    16000
+  ],
   "limits": [
-    { "freq_hz": 100,   "upper_db": 80, "lower_db": 50 },
-    { "freq_hz": 200,   "upper_db": 78, "lower_db": 58 },
-    { "freq_hz": 300,   "upper_db": 79, "lower_db": 63 },
-    { "freq_hz": 500,   "upper_db": 80, "lower_db": 66 },
-    { "freq_hz": 700,   "upper_db": 81, "lower_db": 69 },
-    { "freq_hz": 1000,  "upper_db": 81, "lower_db": 71 },
-    { "freq_hz": 1500,  "upper_db": 81, "lower_db": 71 },
-    { "freq_hz": 2000,  "upper_db": 81, "lower_db": 71 },
-    { "freq_hz": 3000,  "upper_db": 80, "lower_db": 69 },
-    { "freq_hz": 4000,  "upper_db": 79, "lower_db": 68 },
-    { "freq_hz": 5000,  "upper_db": 79, "lower_db": 67 },
-    { "freq_hz": 6000,  "upper_db": 78, "lower_db": 65 },
-    { "freq_hz": 8000,  "upper_db": 78, "lower_db": 62 },
-    { "freq_hz": 10000, "upper_db": 78, "lower_db": 58 },
-    { "freq_hz": 12000, "upper_db": 78, "lower_db": 55 },
-    { "freq_hz": 14000, "upper_db": 80, "lower_db": 50 },
-    { "freq_hz": 16000, "upper_db": 82, "lower_db": 44 }
+    {
+      "freq_hz": 200,
+      "upper_db": 76,
+      "lower_db": 60
+    },
+    {
+      "freq_hz": 300,
+      "upper_db": 78,
+      "lower_db": 64
+    },
+    {
+      "freq_hz": 500,
+      "upper_db": 80,
+      "lower_db": 68
+    },
+    {
+      "freq_hz": 700,
+      "upper_db": 81,
+      "lower_db": 69
+    },
+    {
+      "freq_hz": 1000,
+      "upper_db": 81,
+      "lower_db": 71
+    },
+    {
+      "freq_hz": 1500,
+      "upper_db": 81,
+      "lower_db": 71
+    },
+    {
+      "freq_hz": 2000,
+      "upper_db": 81,
+      "lower_db": 71
+    },
+    {
+      "freq_hz": 3000,
+      "upper_db": 81,
+      "lower_db": 69
+    },
+    {
+      "freq_hz": 4000,
+      "upper_db": 80,
+      "lower_db": 68
+    },
+    {
+      "freq_hz": 5000,
+      "upper_db": 80,
+      "lower_db": 66
+    },
+    {
+      "freq_hz": 6000,
+      "upper_db": 79,
+      "lower_db": 65
+    },
+    {
+      "freq_hz": 8000,
+      "upper_db": 78,
+      "lower_db": 62
+    },
+    {
+      "freq_hz": 10000,
+      "upper_db": 77,
+      "lower_db": 59
+    },
+    {
+      "freq_hz": 12000,
+      "upper_db": 75,
+      "lower_db": 55
+    },
+    {
+      "freq_hz": 14000,
+      "upper_db": 74,
+      "lower_db": 50
+    },
+    {
+      "freq_hz": 16000,
+      "upper_db": 72,
+      "lower_db": 44
+    }
   ],
   "thd_limits": {
-    "freq_range_hz": [200, 10000],
+    "freq_range_hz": [
+      200,
+      10000
+    ],
     "ppo": 12,
+    "harmonics": [
+      "H2",
+      "H3",
+      "H4",
+      "H5",
+      "H6",
+      "H7",
+      "H8",
+      "H9"
+    ],
     "limits": [
-      { "freq_hz": 200,   "max_thd_pct": 10.0 },
-      { "freq_hz": 500,   "max_thd_pct": 5.0 },
-      { "freq_hz": 1000,  "max_thd_pct": 3.0 },
-      { "freq_hz": 2000,  "max_thd_pct": 3.0 },
-      { "freq_hz": 5000,  "max_thd_pct": 5.0 },
-      { "freq_hz": 10000, "max_thd_pct": 10.0 }
+      {
+        "freq_hz": 200,
+        "max_thd_pct": 10.0
+      },
+      {
+        "freq_hz": 500,
+        "max_thd_pct": 5.0
+      },
+      {
+        "freq_hz": 1000,
+        "max_thd_pct": 3.0
+      },
+      {
+        "freq_hz": 2000,
+        "max_thd_pct": 3.0
+      },
+      {
+        "freq_hz": 5000,
+        "max_thd_pct": 5.0
+      },
+      {
+        "freq_hz": 10000,
+        "max_thd_pct": 10.0
+      }
+    ]
+  },
+  "hohd_limits": {
+    "freq_range_hz": [
+      200,
+      8000
+    ],
+    "ppo": 12,
+    "harmonics": [
+      "H10",
+      "H11",
+      "H12",
+      "H13",
+      "H14",
+      "H15"
+    ],
+    "limits": [
+      {
+        "freq_hz": 200,
+        "max_hohd_pct": 2.0
+      },
+      {
+        "freq_hz": 500,
+        "max_hohd_pct": 1.0
+      },
+      {
+        "freq_hz": 1000,
+        "max_hohd_pct": 0.5
+      },
+      {
+        "freq_hz": 2000,
+        "max_hohd_pct": 0.5
+      },
+      {
+        "freq_hz": 5000,
+        "max_hohd_pct": 1.0
+      },
+      {
+        "freq_hz": 8000,
+        "max_hohd_pct": 2.0
+      }
     ]
   },
   "metadata": {
     "part_number": "SPK-EXAMPLE",
-    "notes": "Example mask with magnitude and THD limits. Adjust to your golden sample population."
+    "notes": "Example mask with magnitude, THD, and HOHD limits. THD uses REW's pre-aggregated THD column (H2-H9 by default in REW). HOHD is computed by sqrt-sum-of-squares of H10-H15; this requires REW to be configured to report higher harmonics. Adjust to your DUT population."
   }
 }

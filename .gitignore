@@ -1,6 +1,36 @@
-
+# Output directories (generated per-run, not for version control)
 iqc_plots/
 iqc_reports/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Screen recordings — too large for version control,
+# attach to GitHub releases or external storage instead
+*.mov
+*.mp4
+
+# Local working masks (developers commit example masks under speaker.json /
+# limits/example.json instead). The from_gui.json file is a per-developer
+# scratchpad created by the limit tool's combined export.
+limits/from_gui.json
+
+# Old experimental limit files retained locally only
+limit_tool/LimitV3.json
+limit_tool/new-limits.json
+limit_tool/test*.json
+limit_tool/V2*Limits*.txt
